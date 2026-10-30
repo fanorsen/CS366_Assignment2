@@ -1,0 +1,27 @@
+# Data and large outputs
+data/
+*.ckpt
+*.pt
+outputs/checkpoints/*
+outputs/logs/*
+outputs/samples/*
+
+# Logging / experiment tracking
+wandb/
+lightning_logs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Notebooks and editor/OS junk
+.ipynb_checkpoints/
+*.ipynb
+.vscode/
+.DS_Store
+
+# Slurm output
+*.out
+*.err
