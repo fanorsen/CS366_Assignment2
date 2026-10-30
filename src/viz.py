@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from torchmetrics.classification import MulticlassJaccardIndex, MulticlassF1Score
 
 from datamodule_oxpet import PetTrimapDataset, CLASS_NAMES
-from Deep_Learning_366.Assignment_2.model_unetpp import UNetPlusPlusLightning
+from model_unetpp import UNetPlusPlusLightning
 
 
 COLORS = np.array([[220, 20, 60], [0, 0, 0], [34, 139, 34]], dtype=np.uint8)

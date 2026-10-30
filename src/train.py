@@ -1,5 +1,6 @@
-"""Train UNet++ on Oxford-IIIT Pet using PyTorch Lightning."""
+"""Train or evaluate UNet++ on Oxford-IIIT Pet using PyTorch Lightning."""
 import argparse
+import json
 from pathlib import Path
 import torch
 import lightning.pytorch as pl
@@ -7,11 +8,14 @@ from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, Learning
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 
 from datamodule_oxpet import OxfordPetDataModule
-from Deep_Learning_366.Assignment_2.model_unetpp import UNetPlusPlusLightning
+from model_unetpp import UNetPlusPlusLightning
 
 
 def parse_args():
     p = argparse.ArgumentParser()
+    p.add_argument("--mode", choices=["train", "eval"], default="train",
+                   help="train: fit the model; eval: test a checkpoint on the official test split")
+    p.add_argument("--ckpt", default="", help="Checkpoint path (required for --mode eval)")
     p.add_argument("--root", default="./data")
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=8)
@@ -31,6 +35,29 @@ def parse_args():
     return p.parse_args()
 
 
+def evaluate(args, dm, log_dir, has_cuda):
+    if not args.ckpt:
+        raise SystemExit("--ckpt is required for --mode eval")
+    model = UNetPlusPlusLightning.load_from_checkpoint(args.ckpt, map_location="cpu")
+    trainer = pl.Trainer(
+        accelerator="gpu" if has_cuda else "cpu",
+        devices=1,
+        precision="16-mixed" if has_cuda else "32-true",
+        logger=False,
+        deterministic="warn",
+        enable_progress_bar=True,
+    )
+    results = trainer.test(model, datamodule=dm)[0]
+    results = {k: float(v) for k, v in results.items()}
+    out_path = log_dir / f"test_{args.run_name}.json"
+    with open(out_path, "w") as f:
+        json.dump({"run": args.run_name, "checkpoint": args.ckpt, **results}, f, indent=2)
+    print(f"\n=== Test results for {args.run_name} ===")
+    for k, v in results.items():
+        print(f"{k}: {v:.4f}")
+    print(f"Saved to {out_path}")
+
+
 def main():
     args = parse_args()
     pl.seed_everything(args.seed, workers=True)
@@ -44,9 +71,15 @@ def main():
     dm = OxfordPetDataModule(
         root=args.root, image_size=args.image_size, batch_size=args.batch_size,
         num_workers=args.num_workers, val_fraction=args.val_fraction, seed=args.seed,
-        augmentation=args.augmentation, download=True,
+        augmentation=args.augmentation and args.mode == "train", download=True,
         limit_train=args.limit_train, limit_val=args.limit_val,
     )
+    has_cuda = torch.cuda.is_available()
+
+    if args.mode == "eval":
+        evaluate(args, dm, log_dir, has_cuda)
+        return
+
     model = UNetPlusPlusLightning(
         learning_rate=args.learning_rate, loss_name=args.loss,
         pretrained=not args.no_pretrained,
@@ -61,11 +94,10 @@ def main():
     callbacks = [checkpoint, early_stop, LearningRateMonitor(logging_interval="epoch")]
 
     if args.wandb:
-        logger = WandbLogger(project="oxford-iiit-pet-unetpp", name=args.run_name, log_model=False)
+        logger = WandbLogger(project="cs366-ass2", name=args.run_name, log_model=False)
     else:
         logger = CSVLogger(save_dir=log_dir, name=args.run_name)
 
-    has_cuda = torch.cuda.is_available()
     trainer = pl.Trainer(
         max_epochs=args.epochs,
         accelerator="gpu" if has_cuda else "cpu",
@@ -74,7 +106,7 @@ def main():
         callbacks=callbacks,
         logger=logger,
         log_every_n_steps=10,
-        deterministic=True,
+        deterministic="warn",
         gradient_clip_val=1.0,
         enable_progress_bar=True,
     )
@@ -86,4 +118,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

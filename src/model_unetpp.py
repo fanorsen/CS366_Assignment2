@@ -5,6 +5,8 @@ import lightning.pytorch as pl
 import segmentation_models_pytorch as smp
 from torchmetrics.classification import MulticlassJaccardIndex, MulticlassF1Score
 
+CLASS_NAMES = ["pet", "background", "border"]
+
 
 class UNetPlusPlusLightning(pl.LightningModule):
     def __init__(self, num_classes=3, learning_rate=1e-3, weight_decay=1e-4,
@@ -27,6 +29,9 @@ class UNetPlusPlusLightning(pl.LightningModule):
         self.val_dice = MulticlassF1Score(num_classes=num_classes, average="macro")
         self.test_iou = MulticlassJaccardIndex(num_classes=num_classes, average="macro")
         self.test_dice = MulticlassF1Score(num_classes=num_classes, average="macro")
+        # Per-class test metrics (one value per class: pet, background, border)
+        self.test_iou_pc = MulticlassJaccardIndex(num_classes=num_classes, average="none")
+        self.test_dice_pc = MulticlassF1Score(num_classes=num_classes, average="none")
 
     def forward(self, images):
         return self.model(images)
@@ -69,11 +74,23 @@ class UNetPlusPlusLightning(pl.LightningModule):
         images, masks = batch
         logits = self(images)
         loss = self._loss(logits, masks)
-        self.test_iou.update(logits.argmax(dim=1), masks)
-        self.test_dice.update(logits.argmax(dim=1), masks)
+        preds = logits.argmax(dim=1)
+        self.test_iou.update(preds, masks)
+        self.test_dice.update(preds, masks)
+        self.test_iou_pc.update(preds, masks)
+        self.test_dice_pc.update(preds, masks)
         self.log("test_loss", loss, on_step=False, on_epoch=True, batch_size=images.size(0))
         self.log("test_miou", self.test_iou, on_step=False, on_epoch=True, prog_bar=True, batch_size=images.size(0))
         self.log("test_dice", self.test_dice, on_step=False, on_epoch=True, prog_bar=True, batch_size=images.size(0))
+
+    def on_test_epoch_end(self):
+        iou = self.test_iou_pc.compute()
+        dice = self.test_dice_pc.compute()
+        for i, name in enumerate(CLASS_NAMES[: self.num_classes]):
+            self.log(f"test_iou_{name}", iou[i])
+            self.log(f"test_dice_{name}", dice[i])
+        self.test_iou_pc.reset()
+        self.test_dice_pc.reset()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
