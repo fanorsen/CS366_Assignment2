@@ -1,156 +1,141 @@
-# -*- coding: utf-8 -*-
-"""
-Download Oxford-IIIT Pet (via torchvision) and visualize images + segmentation masks.
-- Supports trimap (3-class) or binary (merge border into pet).
-- Saves a visualization grid to ./samples/oxpet_viz_grid.png
-- Also prints basic dataset stats.
-Usage:
-    python oxpet_download_and_viz.py --root ~/data --split trainval --classes trimap --n 12
-"""
-import argparse
-from pathlib import Path
-import random
-import numpy as np
-from PIL import Image
-import matplotlib.pyplot as plt
+# Assignment 2 — UNet++ Semantic Segmentation on Oxford-IIIT Pet
 
-import torch
-from torchvision.datasets import OxfordIIITPet
-from torchvision import transforms as T
+3-class semantic segmentation (pet / background / border) of the Oxford-IIIT Pet trimaps
+using UNet++ (ResNet-34 encoder, ImageNet-pretrained) and PyTorch Lightning.
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--root", type=str, default="/Users/schen3/Downloads/data",
-                   help="Data root directory (should contain oxford-iiit-pet/ subdirectory)")
-    p.add_argument("--split", type=str, default="trainval",
-                   choices=["trainval", "test"], help="Data split")
-    p.add_argument("--classes", type=str, default="trimap",
-                   choices=["trimap", "binary"],
-                   help="trimap=3 classes (pet/background/border); binary=2 classes (border merged into foreground)")
-    p.add_argument("--resize", type=int, default=512,
-                   help="Resize to this size on the short side (images and masks resized together)")
-    p.add_argument("--n", type=int, default=12, help="Number of visualization samples")
-    p.add_argument("--seed", type=int, default=42, help="Random seed")
-    p.add_argument("--save-dir", type=str, default="samples", help="Output directory")
-    return p.parse_args()
+**Weights & Biases dashboard:** https://forge.coreweave.com/wandb/fanorsen-hamilton-college/cs366-ass2
 
-def mask_to_classes(mask_pil: Image.Image, mode: str = "trimap"):
-    """
-    Official trimap values: 1=pet/foreground, 2=background, 3=border
-    Returns: integer numpy array (H,W) and list of class names
-    """
-    m = np.array(mask_pil, dtype=np.int64)
-    if mode == "trimap":
-        # Map to {0,1,2} for easier coloring and computation: 0=pet, 1=background, 2=border
-        m = m - 1
-        class_names = ["pet", "background", "border"]
-    else:
-        # binary: merge border into foreground
-        pet = (m == 1) | (m == 3)
-        m = pet.astype(np.int64)  # 1=pet, 0=background
-        class_names = ["background", "pet"]
-    return m, class_names
+## Results (official test split, 3,669 images)
 
-def colorize_mask(mask: np.ndarray, class_names):
-    """Map integer label mask to RGB for visualization (manual colors for classes)."""
-    H, W = mask.shape
-    vis = np.zeros((H, W, 3), dtype=np.uint8)
-    if len(class_names) == 3:
-        # 0=pet(red), 1=background(black), 2=border(green)
-        vis[mask == 0] = (220, 20, 60)   # red
-        vis[mask == 1] = (0, 0, 0)       # black
-        vis[mask == 2] = (34, 139, 34)   # green
-    else:
-        # Binary: 1=pet(red), 0=background(black)
-        vis[mask == 1] = (220, 20, 60)
-        vis[mask == 0] = (0, 0, 0)
-    return Image.fromarray(vis, mode="RGB")
+| Run | Test mIoU | Test Dice | IoU pet | IoU bg | IoU border |
+|---|---|---|---|---|---|
+| baseline (CE) | 0.7884 | 0.8729 | 0.8645 | 0.9274 | 0.5734 |
+| + CE+Dice loss | 0.7932 | 0.8763 | 0.8674 | 0.9296 | 0.5828 |
+| + augmentation | 0.8035 | 0.8829 | 0.8800 | 0.9358 | 0.5946 |
+| **+ both (best)** | **0.8062** | **0.8850** | 0.8798 | 0.9364 | 0.6024 |
 
-def overlay(image_pil: Image.Image, mask_rgb: Image.Image, alpha=0.45):
-    """Overlay using PIL's blend to avoid dtype/size issues."""
-    if image_pil.size != mask_rgb.size:
-        mask_rgb = mask_rgb.resize(image_pil.size, resample=Image.NEAREST)
-    img_rgb = image_pil.convert("RGB")
-    return Image.blend(img_rgb, mask_rgb, alpha)
+Best checkpoint: `ce_dice_aug-epoch=28-val_miou=0.8040.ckpt` (best val mIoU).
 
-def main():
-    args = parse_args()
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+## Project structure
 
-    root = Path(args.root).expanduser()
-    save_dir = Path(args.save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
+```
+README.md
+requirements.txt
+oxpet_download_and_viz_fixed.py   # provided data exploration script
+src/
+  datamodule_oxpet.py             # LightningDataModule (80/20 train/val split of trainval, test split)
+  model_unetpp.py                 # LightningModule: UNet++, losses, mIoU/Dice metrics (macro + per-class)
+  train.py                        # CLI: --mode train (fit) or --mode eval (test a checkpoint)
+  viz.py                          # colorized masks + input/GT/prediction/overlay panels
+outputs/
+  checkpoints/  logs/  samples/
+```
 
-    # Resize images and masks the same way (use nearest for masks to avoid interpolation artifacts)
-    img_tf = T.Resize(args.resize, antialias=True)
-    mask_tf = T.Resize(args.resize, interpolation=Image.NEAREST)
+## 1. Setup
 
-    # Do not download: download=False. If files are missing locally, an exception will be raised with guidance.
-    try:
-        ds = OxfordIIITPet(
-            root=str(root),
-            split=args.split,
-            target_types="segmentation",
-            transform=img_tf,
-            target_transform=mask_tf,
-            download=False
-        )
-    except Exception as e:
-        print("\n[Error] Failed to load data:", e)
-        print("Please confirm the directory exists:")
-        print(f"  {root}/oxford-iiit-pet/images/")
-        print(f"  {root}/oxford-iiit-pet/annotations/trimaps/")
-        print("And ensure files are extracted (official annotations.tar.gz contains trimaps/ and xmls/).")
-        return
+Tested with Python 3.13, PyTorch 2.11 (CUDA 12.8), on an NVIDIA RTX 5070 Ti (16 GB).
 
-    print(f"Loaded Oxford-IIIT Pet: split={args.split}, size={len(ds)}")
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements.txt
+wandb login   # optional, only needed for --wandb logging
+```
 
-    n = min(args.n, len(ds))
-    idxs = random.sample(range(len(ds)), n)
+## 2. Download the dataset
 
-    # Create grid: each row shows (image, mask, overlay)
-    cols = 3
-    rows = n
-    fig_w = 10
-    fig_h = max(6, rows * 2.2)
-    fig, axes = plt.subplots(rows, cols, figsize=(fig_w, fig_h))
+```bash
+mkdir -p data/oxford-iiit-pet && cd data/oxford-iiit-pet
+wget https://thor.robots.ox.ac.uk/datasets/pets/images.tar.gz
+wget https://thor.robots.ox.ac.uk/datasets/pets/annotations.tar.gz
+tar -xzf images.tar.gz && tar -xzf annotations.tar.gz
+rm images.tar.gz annotations.tar.gz
+cd ../..
+```
 
-    for r, idx in enumerate(idxs):
-        img_pil, mask_pil = ds[idx]  # both already resized
-        mask_arr, class_names = mask_to_classes(mask_pil, mode=args.classes)
-        mask_rgb = colorize_mask(mask_arr, class_names)
-        over = overlay(img_pil, mask_rgb, alpha=0.45)
+## 3. Explore the data
 
-        if rows == 1:
-            ax_img, ax_mask, ax_over = axes[0], axes[1], axes[2]
-        else:
-            ax_img, ax_mask, ax_over = axes[r]
+```bash
+python oxpet_download_and_viz_fixed.py --root ./data --split trainval \
+  --classes trimap --n 12 --resize 512 --save-dir outputs/samples
+```
 
-        ax_img.imshow(img_pil)
-        ax_img.set_title("Image")
-        ax_img.axis("off")
+Produces `outputs/samples/oxpet_viz_grid.png` (image, colorized trimap, overlay).
 
-        ax_mask.imshow(mask_rgb)
-        ax_mask.set_title(f"Mask ({args.classes})")
-        ax_mask.axis("off")
+## 4. Train
 
-        ax_over.imshow(over)
-        ax_over.set_title("Overlay")
-        ax_over.axis("off")
+Trimap values {1, 2, 3} are mapped to {0 = pet, 1 = background, 2 = border}; masks are resized
+with NEAREST interpolation. The best checkpoint by validation mIoU is saved to `outputs/checkpoints/`.
 
-        # Also save the first few individual overlay images
-        if r < 4:
-            over.save(save_dir / f"overlay_{args.classes}_{r}.png")
+```bash
+# Baseline: CrossEntropy, no augmentation
+python src/train.py --root ./data --epochs 40 --batch-size 16 --image-size 256 \
+  --num-workers 6 --wandb --run-name baseline
 
-    plt.tight_layout()
-    out_path = save_dir / "oxpet_viz_grid.png"
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
+# Improvement 1: CrossEntropy + Dice loss
+python src/train.py --root ./data --epochs 40 --batch-size 16 --image-size 256 \
+  --num-workers 6 --wandb --run-name ce_dice --loss ce_dice
 
-    print(f"Saved visualization grid to: {out_path.resolve()}")
-    print("Class names:", class_names)
+# Improvement 2: data augmentation
+python src/train.py --root ./data --epochs 40 --batch-size 16 --image-size 256 \
+  --num-workers 6 --wandb --run-name aug --augmentation
 
-if __name__ == "__main__":
-    main()
+# Both improvements
+python src/train.py --root ./data --epochs 40 --batch-size 16 --image-size 256 \
+  --num-workers 6 --wandb --run-name ce_dice_aug --loss ce_dice --augmentation
+```
+
+Training settings: AdamW (lr 1e-3, weight decay 1e-4), ReduceLROnPlateau on val mIoU
+(factor 0.5, patience 2), early stopping on val mIoU (patience 5), gradient clipping 1.0,
+16-bit mixed precision (AMP), seed 42, 80/20 train/val split of `trainval`.
+Each run took about 8–11 minutes; total GPU time across all runs was about 40 minutes.
+
+## 5. Evaluate on the test split
+
+```bash
+python src/train.py --mode eval --root ./data --image-size 256 --batch-size 16 \
+  --run-name ce_dice_aug --ckpt "outputs/checkpoints/ce_dice_aug-epoch=28-val_miou=0.8040.ckpt"
+```
+
+Prints overall and per-class mIoU / Dice and saves them to `outputs/logs/test_<run-name>.json`.
+Repeat with each run's checkpoint to reproduce the results table.
+
+## 6. Visualize predictions
+
+```bash
+python src/viz.py --root ./data \
+  --checkpoint "outputs/checkpoints/ce_dice_aug-epoch=28-val_miou=0.8040.ckpt" \
+  --split test --image-size 256 --n 12 --output-dir outputs/samples
+```
+
+Saves input / ground truth / prediction / overlay panels to `outputs/samples/`.
+
+## Running on a Slurm cluster
+
+We trained on Hamilton's cs-hpc Slurm cluster. Each command above was wrapped in a batch script like:
+
+```bash
+#!/bin/bash
+#SBATCH --partition=students
+#SBATCH --account=cs410
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=16G
+#SBATCH --time=03:50:00
+source /path/to/venv/bin/activate
+cd /path/to/Assignment2
+python src/train.py --root /path/to/data --epochs 40 --batch-size 16 --image-size 256 \
+  --num-workers 6 --wandb "$@"
+```
+
+submitted with, e.g., `sbatch train.sbatch --run-name aug --augmentation`.
+
+## References
+
+- Z. Zhou et al., "UNet++: A Nested U-Net Architecture for Medical Image Segmentation," DLMIA 2018.
+- O. M. Parkhi et al., "Cats and Dogs," CVPR 2012 (Oxford-IIIT Pet dataset).
+- segmentation-models-pytorch: https://github.com/qubvel-org/segmentation_models.pytorch
+- PyTorch Lightning: https://lightning.ai
+- TorchMetrics: https://lightning.ai/docs/torchmetrics
